@@ -24,28 +24,84 @@ class SimpleCNNWithBatchNorm(nn.Module):
     def __init__(self):
         super().__init__()
         # Convolutional layers with batch normalization
-        self.conv1 = nn.Conv2d(1, 10, kernel_size=3, stride=1, padding=1)
-        self.bn1 = nn.BatchNorm2d(10)
-        self.conv2 = nn.Conv2d(10, 20, kernel_size=3, stride=1, padding=1)
-        self.bn2 = nn.BatchNorm2d(20)
+        self.conv1 = nn.Conv2d(1, 5, kernel_size=2, stride=1, padding=1)
+        self.bn1 = nn.BatchNorm2d(5)
+        self.conv2 = nn.Conv2d(5, 10, kernel_size=2, stride=1, padding=1)
+        self.bn2 = nn.BatchNorm2d(10)
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
         # Fully connected layers
-        self.fc1 = nn.Linear(20 * 4 * 4, 5)
+        self.fc1 = nn.Linear(10 * 5 * 5, 5)
         self.bn_fc1 = nn.BatchNorm1d(5)
         self.fc2 = nn.Linear(5, 1)
 
     def forward(self, x):
         x = self.pool(F.relu(self.bn1(self.conv1(x))))
         x = self.pool(F.relu(self.bn2(self.conv2(x))))
-        x = x.view(-1, 20 * 4 * 4)
+        x = x.view(-1, 10 * 5 * 5)
         x = F.relu(self.bn_fc1(self.fc1(x)))
         x = self.fc2(x)
         return x
 
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class AdaptiveComplexCNN(nn.Module):
+    def __init__(self, input_channels=1, num_classes=1, img_size=19):
+        super().__init__()
+        self.input_channels = input_channels
+        self.img_size = img_size
+
+        # Updated Convolutional layers setup with an additional layer
+        input_num = 32
+        self.conv_layers = nn.Sequential(
+            nn.Conv2d(input_channels, input_num, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(input_num),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(input_num, 2 * input_num, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(2 * input_num),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(2 * input_num, 3 * input_num, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(3 * input_num),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+        )
+
+        # Dynamically calculate the size of the conv output to be fed into the FC layers
+        self.flattened_size = self._get_conv_output_size(img_size)
+
+        # Fully connected layers setup
+        self.fc_layers = nn.Sequential(
+            nn.Linear(self.flattened_size, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(128, num_classes),
+        )
+
+    def _get_conv_output_size(self, img_size):
+        # Simulate a forward pass through the conv layers using a dummy input
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, self.input_channels, img_size, img_size)
+            dummy_output = self.conv_layers(dummy_input)
+            return int(torch.numel(dummy_output) / dummy_output.shape[0])
+
+    def forward(self, x):
+        x = self.conv_layers(x)
+        x = x.view(x.size(0), -1)  # Flatten
+        x = self.fc_layers(x)
+        return x
+
+
 class FaceRecognition:
     """Face recognition model that trains and evaluates a CNN with batch normalization."""
-    def __init__(self, data_path,batch_size=10,num_epochs=50,lr=0.001,validation_split_factor=7):
+    def __init__(self,data_path, test_save_path=None,batch_size=5,num_epochs=40,lr=0.0001,validation_split_factor=7):
         self.data_path = data_path
+        self.test_save_path = test_save_path
         self.batch_size = batch_size
         self.num_epochs = num_epochs
         self.lr = lr
@@ -57,9 +113,9 @@ class FaceRecognition:
 
     def train_model(self):
 
-        self.model = SimpleCNNWithBatchNorm().to(device=device)
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr, weight_decay=0.0)
-        pos_weight = torch.tensor([1.5])
+        self.model = AdaptiveComplexCNN().to(device=device)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr, weight_decay=0.15)
+        pos_weight = torch.tensor([3])
 
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
@@ -93,10 +149,19 @@ class FaceRecognition:
 
         ground_truth = torch.tensor([], dtype=torch.float32)  # Initialize empty tensor for ground truths
         predictions = torch.tensor([], dtype=torch.float32)  # Initialize empty tensor for predictions
-
         with torch.no_grad():
             for images, labels in loader:
                 outputs = self.model(images)
+
+                if len(labels)<2:
+                    if 0*labels==1:
+                        im_name = str(len(predictions))+'_'+str((torch.sigmoid(outputs).numpy()>0.5)[0][0])
+                        file_name = os.path.join(self.test_save_path, im_name+'.jpg')
+                        im = images.numpy()[0, 0, ...]
+                        im = (im - np.min(im)) / (np.max(im) - np.min(im)+1e-9)
+                        image = Image.fromarray(np.uint8(256*im))
+                        image.save(file_name)
+
                 loss = criterion(outputs, labels.float())
                 total_loss += loss.item() * images.size(0)
                 prediction = (torch.sigmoid(outputs) >= 0.5).float()
@@ -119,12 +184,17 @@ class FaceRecognition:
             # False Negatives (FN): ground_truth is 1 but predictions are 0
             fn = ((ground_truth == 1) & (predictions == 0)).sum()
 
-        # print(
-        #     f"True Positives: {tp / len(loader.dataset)}, True Negatives: {tn / len(loader.dataset)}, False Positives: {fp / len(loader.dataset)}, False Negatives: {fn / len(loader.dataset)}")
-        print(f"Positives score: {tp / (fn + tp)}")
+        pos_score = tp / (fn + tp)
+        neg_score = tn / (fp + tn)
+        print(f"Positives score: {pos_score}")
+        print(f"Negative score: {neg_score}")
+        print(f"tp: {tp/len(predictions)}")
+        print(f"tn: {tn/len(predictions)}")
+        print(f"fp: {fp/len(predictions)}")
+        print(f"fn: {fn/len(predictions)}")
         total_accuracy /= len(loader.dataset)
         total_loss /= len(loader.dataset)
-        return total_accuracy, total_loss
+        return (pos_score+neg_score)/2, total_loss
 
     def parse_data(self, folder_name):
         transformations = self.get_transformations(True if folder_name == TEST_NAME else False)
@@ -163,7 +233,7 @@ class FaceRecognition:
 
         train_dataset, validation_dataset = random_split(dataset, [self.train_count, self.validation_count])
 
-        class_weights = [1, 2]  # class 0 has weight 1, class 1 has weight 5
+        class_weights = [1, 2]  # class 0 has weight 1, class 1 has weight 3
 
         # Generate sample weights based on class weights and labels in the train dataset
         sample_weights = [class_weights[int(label.numpy())] for _, label in train_dataset]
@@ -176,6 +246,59 @@ class FaceRecognition:
 
         self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, sampler=sampler)
         self.validation_loader = DataLoader(validation_dataset, batch_size=self.batch_size, shuffle=True)
+
+    @staticmethod
+    def get_transformations_p(for_test=False):
+        norm_mean = [0.5]
+        norm_std = [0.5]
+
+        if not for_test:
+            return [
+                transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize(norm_mean, norm_std),
+                ]),
+                transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.GaussianBlur(kernel_size=(5, 9), sigma=(5, 5)),
+                    transforms.Normalize(norm_mean, norm_std),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.RandomVerticalFlip(),
+                    transforms.RandomRotation(degrees=(0, 360)),
+                ]),
+                transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize(norm_mean, norm_std),
+                    transforms.RandomGrayscale(0.4),
+                    transforms.GaussianBlur(kernel_size=(5, 9), sigma=(5, 5)),
+                    transforms.RandomRotation(degrees=(0, 360)),
+                ]),
+                transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize(norm_mean, norm_std),
+                    transforms.GaussianBlur(kernel_size=(5, 9), sigma=(5, 5)),
+                    transforms.ColorJitter(brightness=0.5, hue=0.3),
+                    transforms.RandomRotation(degrees=(0, 360)),
+                ]),
+                transforms.Compose([
+                    transforms.RandomResizedCrop(size=[19,19], scale=(0.8, 1.0), ratio=(1.0, 1.0)),
+                    transforms.GaussianBlur(kernel_size=(5, 9), sigma=(5, 5)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(norm_mean, norm_std),
+                    transforms.RandomRotation(degrees=(0, 360)),
+                ]),
+                transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize(norm_mean, norm_std),
+                    transforms.GaussianBlur(kernel_size=(5, 9), sigma=(0.1, 5)),
+                    transforms.RandomRotation(degrees=(0, 360)),
+                ])
+            ]
+        else:
+            return [
+                transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize(norm_mean, norm_std),])]
 
     @staticmethod
     def get_transformations(for_test=False):
@@ -197,7 +320,7 @@ class FaceRecognition:
                 transforms.Compose([
                     transforms.ToTensor(),
                     transforms.Normalize(norm_mean, norm_std),
-                    transforms.RandomGrayscale(0.4),
+                    # transforms.RandomGrayscale(0.4),
                 ]),
                 transforms.Compose([
                     transforms.ToTensor(),
@@ -218,15 +341,12 @@ class FaceRecognition:
 
     def evaluate_model(self):
 
-        test_loader = DataLoader(self.parse_data(TEST_NAME), batch_size=self.batch_size, shuffle=True)
+        test_loader = DataLoader(self.parse_data(TEST_NAME), batch_size=10, shuffle=True)
         test_accuracy, _ = self.evaluate_on_loader(test_loader)
 
         print(f'Test Accuracy: {test_accuracy}')
+        torch.save(self.model, 'model.pth')
 
-        # Integrated Gradients for a single batch
-        images, _ = next(iter(test_loader))
-        ig = IntegratedGradients(self.model)
-        attributions, _ = ig.attribute(images, return_convergence_delta=True)
 
 if __name__ == '__main__':
     # FaceRecognition('/path/to/your/data')
