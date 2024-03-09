@@ -1,17 +1,16 @@
-import numpy as np
-import torch
-import torch.nn as nn
 import glob
 import cv2
-import os
 from torchvision.transforms import transforms
-from captum.attr import IntegratedGradients
-from PIL import Image
 from torch.utils.data import DataLoader, random_split,WeightedRandomSampler
-import torch.nn.functional as F
-
-# Check available device: GPU > MPS > CPU
-device = 'cuda' if torch.cuda.is_available() else 'cpu' if torch.backends.mps.is_available() else 'cpu'
+import os
+import torch
+import numpy as np
+from torchvision.transforms import functional as F
+from PIL import Image
+import torch.nn as nn
+from captum.attr import IntegratedGradients
+from matplotlib import pyplot as plt
+from captum.attr import visualization as viz
 
 # Constants for data organization
 TRUE_NAME = 'face'
@@ -19,36 +18,7 @@ FALSE_NAME = 'non-face'
 TRAIN_NAME = 'train'
 TEST_NAME = 'test'
 
-class SimpleCNNWithBatchNorm(nn.Module):
-    """A simple CNN with batch normalization for face recognition."""
-    def __init__(self):
-        super().__init__()
-        # Convolutional layers with batch normalization
-        self.conv1 = nn.Conv2d(1, 5, kernel_size=2, stride=1, padding=1)
-        self.bn1 = nn.BatchNorm2d(5)
-        self.conv2 = nn.Conv2d(5, 10, kernel_size=2, stride=1, padding=1)
-        self.bn2 = nn.BatchNorm2d(10)
-        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
-        # Fully connected layers
-        self.fc1 = nn.Linear(10 * 5 * 5, 5)
-        self.bn_fc1 = nn.BatchNorm1d(5)
-        self.fc2 = nn.Linear(5, 1)
-
-    def forward(self, x):
-        x = self.pool(F.relu(self.bn1(self.conv1(x))))
-        x = self.pool(F.relu(self.bn2(self.conv2(x))))
-        x = x.view(-1, 10 * 5 * 5)
-        x = F.relu(self.bn_fc1(self.fc1(x)))
-        x = self.fc2(x)
-        return x
-
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-
-class AdaptiveComplexCNN(nn.Module):
+class CNNClassifier(nn.Module):
     def __init__(self, input_channels=1, num_classes=1, img_size=19):
         super().__init__()
         self.input_channels = input_channels
@@ -96,216 +66,88 @@ class AdaptiveComplexCNN(nn.Module):
         x = self.fc_layers(x)
         return x
 
+class DataParser:
+    def __init__(self, data_path, device='cpu'):
+        """
+        Initialize the DataParser instance.
 
-class FaceRecognition:
-    """Face recognition model that trains and evaluates a CNN with batch normalization."""
-    def __init__(self,data_path, test_save_path=None,batch_size=5,num_epochs=40,lr=0.0001,validation_split_factor=7):
+        Parameters:
+        - data_path (str): Path to the data directory.
+        - device (torch.device): The device to use for tensor operations.
+        """
         self.data_path = data_path
-        self.test_save_path = test_save_path
-        self.batch_size = batch_size
-        self.num_epochs = num_epochs
-        self.lr = lr
-        self.validation_split_factor = validation_split_factor
-
-        self.create_augmented_data_loader_with_upsampling()
-        self.train_model()
-        self.evaluate_model()
-
-    def train_model(self):
-
-        self.model = AdaptiveComplexCNN().to(device=device)
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr, weight_decay=0.15)
-        pos_weight = torch.tensor([3])
-
-        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-
-        for epoch in range(self.num_epochs):
-            self.model.train()
-            train_accuracy = 0.0
-            train_loss = 0.0
-
-            for images, labels in self.train_loader:
-                optimizer.zero_grad()
-                outputs = self.model(images)
-                loss = criterion(outputs, labels)
-                loss.backward()
-                optimizer.step()
-                train_loss += loss.item() * images.size(0)
-                prediction = (torch.sigmoid(outputs) >= 0.5).float()
-                train_accuracy += (prediction == labels).sum().item()
-
-            train_accuracy /= self.train_count
-            train_loss /= self.train_count
-            validation_accuracy, validation_loss = self.evaluate_on_loader(self.validation_loader)
-
-            print(f'Epoch: {epoch} Train Loss: {train_loss} Train Accuracy: {train_accuracy} '
-                  f'Validation Loss: {validation_loss} Validation Accuracy: {validation_accuracy}')
-
-    def evaluate_on_loader(self, loader):
-        self.model.eval()
-        total_accuracy = 0.0
-        total_loss = 0.0
-        criterion = nn.BCEWithLogitsLoss()
-
-        ground_truth = torch.tensor([], dtype=torch.float32)  # Initialize empty tensor for ground truths
-        predictions = torch.tensor([], dtype=torch.float32)  # Initialize empty tensor for predictions
-        with torch.no_grad():
-            for images, labels in loader:
-                outputs = self.model(images)
-
-                if len(labels)<2:
-                    if 0*labels==1:
-                        im_name = str(len(predictions))+'_'+str((torch.sigmoid(outputs).numpy()>0.5)[0][0])
-                        file_name = os.path.join(self.test_save_path, im_name+'.jpg')
-                        im = images.numpy()[0, 0, ...]
-                        im = (im - np.min(im)) / (np.max(im) - np.min(im)+1e-9)
-                        image = Image.fromarray(np.uint8(256*im))
-                        image.save(file_name)
-
-                loss = criterion(outputs, labels.float())
-                total_loss += loss.item() * images.size(0)
-                prediction = (torch.sigmoid(outputs) >= 0.5).float()
-                total_accuracy += (prediction == labels).sum().item()
-                ground_truth = torch.cat((ground_truth, labels.float()),
-                                         dim=0)
-                predictions = torch.cat((predictions, prediction),
-                                        dim=0)
-            ground_truth = ground_truth.cpu().numpy()
-            predictions = predictions.cpu().numpy()
-
-            tp = ((ground_truth == 1) & (predictions == 1)).sum()
-
-            # True Negatives (TN): Both ground_truth and predictions are 0
-            tn = ((ground_truth == 0) & (predictions == 0)).sum()
-
-            # False Positives (FP): ground_truth is 0 but predictions are 1
-            fp = ((ground_truth == 0) & (predictions == 1)).sum()
-
-            # False Negatives (FN): ground_truth is 1 but predictions are 0
-            fn = ((ground_truth == 1) & (predictions == 0)).sum()
-
-        pos_score = tp / (fn + tp)
-        neg_score = tn / (fp + tn)
-        print(f"Positives score: {pos_score}")
-        print(f"Negative score: {neg_score}")
-        print(f"tp: {tp/len(predictions)}")
-        print(f"tn: {tn/len(predictions)}")
-        print(f"fp: {fp/len(predictions)}")
-        print(f"fn: {fn/len(predictions)}")
-        total_accuracy /= len(loader.dataset)
-        total_loss /= len(loader.dataset)
-        return (pos_score+neg_score)/2, total_loss
+        self.device = device
 
     def parse_data(self, folder_name):
-        transformations = self.get_transformations(True if folder_name == TEST_NAME else False)
+        """
+        Parse data from a specified folder and apply transformations.
 
+        Parameters:
+        - folder_name (str): Name of the folder to parse data from.
+
+        Returns:
+        - List[Tuple[torch.Tensor, torch.Tensor]]: A list of tuples containing image tensors and labels.
+        """
+        is_test = folder_name == TEST_NAME
+        transformations = self.get_transformations(is_test)
+
+        data_container = self.load_data(folder_name)
+        dataset = self.apply_transformations(data_container, transformations)
+
+        return dataset
+
+    def load_data(self, folder_name):
+        """
+        Load data and labels from a specified folder.
+
+        Parameters:
+        - folder_name (str): The folder name to load data from.
+
+        Returns:
+        - List[List[Any]]: A list of [image, label] pairs.
+        """
         data_container = []
         int_data_path = os.path.join(self.data_path, folder_name)
         for filename in glob.iglob(int_data_path + '/**/*.*', recursive=True):
             img = cv2.imread(filename, -1)
             label = np.array(1 if os.path.basename(os.path.dirname(filename)) == TRUE_NAME else 0).astype(np.float32)
-            data_container.append([img, label[None,...]])
+            data_container.append([img, label[None, ...]])
 
-        dataset = [(transformation(Image.fromarray(img_label[0])).to(device=device), torch.tensor(img_label[1]).to(device=device))
-                   for img_label in data_container for transformation in transformations]
+        return data_container
+
+    def apply_transformations(self, data_container, transformations):
+        """
+        Apply transformations to the loaded data.
+
+        Parameters:
+        - data_container (List[List[Any]]): The loaded data.
+        - transformations (List[Callable]): The transformations to apply.
+
+        Returns:
+        - List[Tuple[torch.Tensor, torch.Tensor]]: Transformed data as tensor pairs.
+        """
+        dataset = [
+            (transformation(Image.fromarray(img_label[0])).to(self.device),
+             torch.tensor(img_label[1]).to(self.device))
+            for img_label in data_container for transformation in transformations
+        ]
 
         return dataset
 
-    def create_augmented_data_loader(self):
+    def get_transformations(self, is_test):
+        """
+        Get the transformations to be applied to the data.
 
-        dataset = self.parse_data(TRAIN_NAME)
+        Parameters:
+        - is_test (bool): Flag indicating whether the transformations are for test data.
 
-        self.validation_count = len(dataset) // self.validation_split_factor
-        self.train_count = len(dataset) - self.validation_count
-
-        train_dataset, validation_dataset = random_split(dataset, [self.train_count, self.validation_count])
-        self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
-        self.validation_loader = DataLoader(validation_dataset, batch_size=self.batch_size, shuffle=True)
-
-    def create_augmented_data_loader_with_upsampling(self):
-
-
-        dataset = self.parse_data(TRAIN_NAME)
-
-
-        self.validation_count = len(dataset) // self.validation_split_factor
-        self.train_count = len(dataset) - self.validation_count
-
-        train_dataset, validation_dataset = random_split(dataset, [self.train_count, self.validation_count])
-
-        class_weights = [1, 2]  # class 0 has weight 1, class 1 has weight 3
-
-        # Generate sample weights based on class weights and labels in the train dataset
-        sample_weights = [class_weights[int(label.numpy())] for _, label in train_dataset]
-
-        # # Ensure sample_weights is a tensor for compatibility with PyTorch DataLoader
-        # sample_weights = torch.tensor(sample_weights, dtype=torch.float)
-
-
-        sampler = WeightedRandomSampler(weights=sample_weights, num_samples=self.train_count, replacement=True)
-
-        self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, sampler=sampler)
-        self.validation_loader = DataLoader(validation_dataset, batch_size=self.batch_size, shuffle=True)
-
-    @staticmethod
-    def get_transformations_p(for_test=False):
+        Returns:
+        - List[Callable]: A list of transformations.
+        """
         norm_mean = [0.5]
         norm_std = [0.5]
 
-        if not for_test:
-            return [
-                transforms.Compose([
-                    transforms.ToTensor(),
-                    transforms.Normalize(norm_mean, norm_std),
-                ]),
-                transforms.Compose([
-                    transforms.ToTensor(),
-                    transforms.GaussianBlur(kernel_size=(5, 9), sigma=(5, 5)),
-                    transforms.Normalize(norm_mean, norm_std),
-                    transforms.RandomHorizontalFlip(),
-                    transforms.RandomVerticalFlip(),
-                    transforms.RandomRotation(degrees=(0, 360)),
-                ]),
-                transforms.Compose([
-                    transforms.ToTensor(),
-                    transforms.Normalize(norm_mean, norm_std),
-                    transforms.RandomGrayscale(0.4),
-                    transforms.GaussianBlur(kernel_size=(5, 9), sigma=(5, 5)),
-                    transforms.RandomRotation(degrees=(0, 360)),
-                ]),
-                transforms.Compose([
-                    transforms.ToTensor(),
-                    transforms.Normalize(norm_mean, norm_std),
-                    transforms.GaussianBlur(kernel_size=(5, 9), sigma=(5, 5)),
-                    transforms.ColorJitter(brightness=0.5, hue=0.3),
-                    transforms.RandomRotation(degrees=(0, 360)),
-                ]),
-                transforms.Compose([
-                    transforms.RandomResizedCrop(size=[19,19], scale=(0.8, 1.0), ratio=(1.0, 1.0)),
-                    transforms.GaussianBlur(kernel_size=(5, 9), sigma=(5, 5)),
-                    transforms.ToTensor(),
-                    transforms.Normalize(norm_mean, norm_std),
-                    transforms.RandomRotation(degrees=(0, 360)),
-                ]),
-                transforms.Compose([
-                    transforms.ToTensor(),
-                    transforms.Normalize(norm_mean, norm_std),
-                    transforms.GaussianBlur(kernel_size=(5, 9), sigma=(0.1, 5)),
-                    transforms.RandomRotation(degrees=(0, 360)),
-                ])
-            ]
-        else:
-            return [
-                transforms.Compose([
-                    transforms.ToTensor(),
-                    transforms.Normalize(norm_mean, norm_std),])]
-
-    @staticmethod
-    def get_transformations(for_test=False):
-        norm_mean = [0.5]
-        norm_std = [0.5]
-
-        if not for_test:
+        if not is_test:
             return [
                 transforms.Compose([
                     transforms.ToTensor(),
@@ -314,18 +156,18 @@ class FaceRecognition:
                 transforms.Compose([
                     transforms.ToTensor(),
                     transforms.Normalize(norm_mean, norm_std),
-                    transforms.RandomHorizontalFlip(),
-                    transforms.RandomVerticalFlip(),
+                    transforms.RandomRotation(degrees=(0, 35)),
                 ]),
                 transforms.Compose([
                     transforms.ToTensor(),
                     transforms.Normalize(norm_mean, norm_std),
-                    # transforms.RandomGrayscale(0.4),
                 ]),
                 transforms.Compose([
                     transforms.ToTensor(),
                     transforms.Normalize(norm_mean, norm_std),
                     transforms.ColorJitter(brightness=0.5, hue=0.3),
+                    transforms.RandomRotation(degrees=(0, 35)),
+
                 ]),
                 transforms.Compose([
                     transforms.ToTensor(),
@@ -339,15 +181,331 @@ class FaceRecognition:
                     transforms.ToTensor(),
                     transforms.Normalize(norm_mean, norm_std),])]
 
-    def evaluate_model(self):
+class ModelTrainer:
+    """
+    Trains and evaluates a face recognition CNN model.
+    """
+    def __init__(self, model, data_processor, config):
+        self.model = model
+        self.data_processor = data_processor
+        self.config = config
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.model.to(self.device)
 
-        test_loader = DataLoader(self.parse_data(TEST_NAME), batch_size=10, shuffle=True)
-        test_accuracy, _ = self.evaluate_on_loader(test_loader)
+    def train(self):
+        """
+        Train the model using the specified dataset and training configuration.
+        """
+        train_loader, validation_loader = self._prepare_data_loaders()
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.config['lr'], weight_decay=0.15)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([3]))
 
-        print(f'Test Accuracy: {test_accuracy}')
-        torch.save(self.model, 'model.pth')
+        for epoch in range(self.config['num_epochs']):
+            self._train_one_epoch(train_loader, optimizer, criterion)
+            self._validate(validation_loader)
 
+        self.save_model()
+
+    def _prepare_data_loaders(self):
+        """
+        Prepares training and validation data loaders with upsampling for the minority class.
+        :return: A tuple of (train_loader, validation_loader)
+        """
+        dataset = self.data_processor.parse_data(TRAIN_NAME)
+        validation_count = len(dataset) // self.config['validation_split_factor']
+        train_count = len(dataset) - validation_count
+        train_dataset, validation_dataset = random_split(dataset, [train_count, validation_count])
+
+        sample_weights = self._get_sample_weights(train_dataset)
+        sampler = WeightedRandomSampler(weights=sample_weights, num_samples=train_count, replacement=True)
+
+        train_loader = DataLoader(train_dataset, batch_size=self.config['batch_size'], sampler=sampler)
+        validation_loader = DataLoader(validation_dataset, batch_size=self.config['batch_size'], shuffle=True)
+
+        return train_loader, validation_loader
+
+    def _get_sample_weights(self, dataset):
+        """
+        Generates sample weights for upsampling based on class distribution.
+        :param dataset: The training dataset.
+        :return: A list of sample weights corresponding to each item in the dataset.
+        """
+        class_weights = [1, 2]  # Adjust based on class distribution
+        sample_weights = [class_weights[int(label.numpy())] for _, label in dataset]
+        return sample_weights
+
+    def _train_one_epoch(self, train_loader, optimizer, criterion):
+        """
+        Trains the model for one epoch.
+        :param epoch: The current epoch number.
+        :param train_loader: DataLoader for the training data.
+        :param optimizer: The optimizer.
+        :param criterion: The loss function.
+        """
+        Performance = PerformanceMetrics()
+
+        for images, labels in train_loader:
+            optimizer.zero_grad()
+            outputs = self.model(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            prediction = torch.sigmoid(outputs) >= 0.5
+            Performance.push(labels, prediction)
+        Performance.calculate_accuracy()
+        pass
+
+
+
+    def _validate(self, validation_loader):
+        """
+        Validates the model on the validation dataset.
+        :param epoch: The current epoch number.
+        :param validation_loader: DataLoader for the validation data.
+        """
+        self.model.eval()
+        performance = PerformanceMetrics()
+
+        with torch.no_grad():
+            for images, labels in validation_loader:
+                outputs = self.model(images)
+                prediction = torch.sigmoid(outputs) >= 0.5
+                performance.push(labels, prediction)
+            performance.calculate_scores()
+
+        pass
+
+    def _save_model(self, save_path='model.pth'):
+        """
+        Saves the trained model to a specified path.
+
+        Parameters:
+        - model: The model to save.
+        - save_path: Path to save the model file.
+        """
+        torch.save(self.model, save_path)
+
+class PerformanceMetrics:
+    """
+    A class for computing and storing performance metrics for binary classification problems.
+    """
+
+    def __init__(self):
+        """
+        Initializes the PerformanceMetrics class with placeholders for metrics.
+        """
+        self.tp = 0  # True Positives
+        self.tn = 0  # True Negatives
+        self.fp = 0  # False Positives
+        self.fn = 0  # False Negatives
+
+        self.ground_truth = torch.tensor([], dtype=torch.float32)  # Initialize empty tensor for ground truths
+        self.predictions = torch.tensor([], dtype=torch.float32)  # Initialize empty tensor for predictions
+
+    def update_metrics(self):
+        """
+        Updates the performance metrics based on the provided ground truth and predictions.
+
+        :param ground_truth: An array of ground truth labels.
+        :param predictions: An array of predicted labels.
+        """
+        self.tp += ((self.ground_truth == 1) & (self.predictions == 1)).sum()
+        self.tn += ((self.ground_truth == 0) & (self.predictions == 0)).sum()
+        self.fp += ((self.ground_truth == 0) & (self.predictions == 1)).sum()
+        self.fn += ((self.ground_truth == 1) & (self.predictions == 0)).sum()
+
+    def calculate_scores(self):
+        """
+        Calculates and prints the positive score, negative score, and the percentage of TP, TN, FP, and FN.
+
+        :return: A dictionary containing all calculated scores and percentages.
+        """
+        pos_score = self.tp / (self.fn + self.tp) if (self.fn + self.tp) > 0 else 0
+        neg_score = self.tn / (self.fp + self.tn) if (self.fp + self.tn) > 0 else 0
+        total_predictions = self.tp + self.tn + self.fp + self.fn
+
+        print(f"Positive score: {100 * pos_score:.2f}%")
+        print(f"Negative score: {100 * neg_score:.2f}%")
+        print(f"TP: {100 * self.tp / total_predictions if total_predictions > 0 else 0 :.2f}%")
+        print(f"TN: {100 * self.tn / total_predictions if total_predictions > 0 else 0 :.2f}%")
+        print(f"FP: {100 * self.fp / total_predictions if total_predictions > 0 else 0 :.2f}%")
+        print(f"FN: {100 * self.fn / total_predictions if total_predictions > 0 else 0 :.2f}%")
+
+
+    @staticmethod
+    def extract_features(model, image_tensor):
+        """
+        Extracts and visualizes features from an image using the Integrated Gradients method.
+
+        This function takes a pre-trained model and an image tensor as inputs, then computes
+        the attributions of the input image with respect to the model's predictions. It
+        visualizes the attributions as a heatmap overlay on the original image.
+
+        Parameters:
+        - model: torch.nn.Module
+          The pre-trained model from which features are to be extracted.
+        - image_tensor: torch.Tensor
+          The input image tensor for which attributions are to be computed. Expected shape
+          is [1, C, H, W], where C is the number of channels, and H, W are the height and
+          width of the image.
+
+        Returns:
+        None. The function visualizes the attributions heatmap overlay directly.
+        """
+        import matplotlib.pyplot as plt
+        model.eval()
+
+        # Initialize Integrated Gradients with the provided model
+        ig = IntegratedGradients(model)
+
+        # Compute attributions using Integrated Gradients
+        # Note: No target index is specified, assuming a single output from the model
+        attributions, delta = ig.attribute(image_tensor, return_convergence_delta=True)
+
+        # Process attributions for visualization
+        attributions_np = attributions.detach().numpy()[0, 0, ...]
+        input_image_np = image_tensor.detach().numpy()[0, 0, ...]
+
+        # Normalize attributions and input image for better visualization
+        attributions_normalized = (attributions_np - np.min(attributions_np)) / np.ptp(attributions_np)
+        input_image_normalized = (input_image_np - np.min(input_image_np)) / np.ptp(input_image_np)
+
+        # Create visualization
+        fig, ax = plt.subplots()
+        ax.imshow(input_image_normalized, cmap='gray', interpolation='nearest')
+        heatmap = ax.imshow(attributions_normalized, cmap='jet', alpha=0.3, interpolation='nearest')
+        cbar = plt.colorbar(heatmap, ax=ax)
+        cbar.set_label('Attribution Strength')
+        ax.set_title("Attributions Heatmap Overlay")
+        plt.axis('off')  # Hide axis for a cleaner visualization
+
+    def calculate_accuracy(self):
+        """
+        Calculates the total accuracy.
+
+        :param total_accuracy: The summed accuracy over all batches.
+        :param loader: The data loader containing the dataset.
+        :return: The total accuracy normalized by the dataset size.
+        """
+        pos_score = self.tp / (self.fn + self.tp) if (self.fn + self.tp) > 0 else 0
+        neg_score = self.tn / (self.fp + self.tn) if (self.fp + self.tn) > 0 else 0
+        accuracy = 0.5*pos_score+0.5*neg_score
+        print(f"Accuracy: {100 * accuracy:.2f}%")
+
+
+    def push(self, ground_truth, prediction):
+        self.ground_truth = torch.cat((self.ground_truth, ground_truth.float()),
+                                 dim=0)
+        self.predictions = torch.cat((self.predictions, prediction),
+                                dim=0)
+        self.update_metrics()
+
+class ModelTester:
+    """
+    A class for testing face recognition models. It supports loading models, combining predictions from two models,
+    and evaluating the combined model on a test dataset.
+    """
+
+    def __init__(self, data_processor, model_paths):
+        """
+        Initializes the FaceModelTester with a test DataLoader and model paths.
+
+        Parameters:
+        - test_data_loader: A DataLoader containing the test dataset.
+        - test_save_path: Path where test results and images are saved.
+        - model_paths: A tuple or list containing paths to the two models to be combined for testing.
+        """
+
+        self.test_data_loader = DataLoader(data_processor.parse_data(TEST_NAME), batch_size=1, shuffle=True)
+        self.test_save_path = os.path.join(data_processor.data_path,'res')
+        os.makedirs(self.test_save_path, exist_ok=True)
+        self.model_paths = model_paths
+        self.models = [self.load_model(path) for path in model_paths]
+
+    def load_model(self, model_path):
+        """
+        Loads a model from a given file path.
+
+        Parameters:
+        - model_path: Path to the model file.
+
+        Returns:
+        - The loaded model.
+        """
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model file not found at {model_path}")
+        model = torch.load(model_path)
+        model.eval()
+        return model
+
+    def test_models(self):
+        """
+        Tests the loaded models on the test dataset, combining predictions where necessary,
+        and saves output images for analysis. Prints evaluation metrics.
+        """
+        if not os.path.exists(self.test_save_path):
+            os.makedirs(self.test_save_path)
+        performance = PerformanceMetrics()
+        # Directories for true and false predictions
+        true_path = os.path.join(self.test_save_path, "true")
+        false_path = os.path.join(self.test_save_path, "false")
+        os.makedirs(true_path, exist_ok=True)
+        os.makedirs(false_path, exist_ok=True)
+
+
+        with torch.no_grad():
+            for images, labels in self.test_data_loader:
+                outputs = self.models[0](images)
+                prediction = torch.sigmoid(outputs) >= 0.5
+
+                # Use the second model if the first model's prediction is uncertain
+                if len(self.models)>1 and prediction.sum() == 0:
+                    outputs = self.models[1](images)
+                    prediction = torch.sigmoid(outputs) >= 0.5
+
+                performance.push(labels, prediction)
+
+                self.save_output_images(images, prediction, true_path, false_path)
+
+
+    def save_output_images(self, images, predictions, true_path, false_path):
+        """
+        Saves output images in separate directories based on prediction results.
+
+        Parameters:
+        - images: Tensor of images from the DataLoader.
+        - predictions: Tensor of model predictions.
+        - true_path: Path to save images for positive predictions.
+        - false_path: Path to save images for negative predictions.
+        """
+        for i, image in enumerate(images):
+            prediction = predictions[i]
+            img = F.to_pil_image(image)
+            if prediction:
+                img.save(os.path.join(true_path, f"{i}.png"))
+            else:
+                img.save(os.path.join(false_path, f"{i}.png"))
+
+def main():
+    """
+    Main function to instantiate model, data processor, and trainer classes and start the training process.
+    """
+    data_path = r'/Users/zvistein/Documents/CV/work chalanges/faces'
+
+    config = {
+        'data_path': data_path,
+        'batch_size': 10,
+        'num_epochs': 40,
+        'lr': 0.0001,
+        'validation_split_factor': 7
+    }
+
+    data_processor = DataParser(data_path)
+    model = CNNClassifier()
+    trainer = ModelTrainer(model, data_processor, config)
+    trainer.train()
+    tester = ModelTester(data_processor, ['model_0.87_0.89.pth','model_0.72_0.94.pth'])
+    tester.test_models()
 
 if __name__ == '__main__':
-    # FaceRecognition('/path/to/your/data')
-    FaceRecognition(r'/Users/zvistein/Documents/CV/work chalanges/faces')
+    main()
