@@ -9,8 +9,6 @@ from torchvision.transforms import functional as F
 from PIL import Image
 import torch.nn as nn
 from captum.attr import IntegratedGradients
-from matplotlib import pyplot as plt
-from captum.attr import visualization as viz
 
 # Constants for data organization
 TRUE_NAME = 'face'
@@ -331,7 +329,6 @@ class PerformanceMetrics:
         print(f"FP: {100 * self.fp / total_predictions if total_predictions > 0 else 0 :.2f}%")
         print(f"FN: {100 * self.fn / total_predictions if total_predictions > 0 else 0 :.2f}%")
 
-
     @staticmethod
     def extract_features(model, image_tensor):
         """
@@ -391,7 +388,6 @@ class PerformanceMetrics:
         neg_score = self.tn / (self.fp + self.tn) if (self.fp + self.tn) > 0 else 0
         accuracy = 0.5*pos_score+0.5*neg_score
         print(f"Accuracy: {100 * accuracy:.2f}%")
-
 
     def push(self, ground_truth, prediction):
         self.ground_truth = torch.cat((self.ground_truth, ground_truth.float()),
