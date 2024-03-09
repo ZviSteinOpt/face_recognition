@@ -67,7 +67,7 @@ class CNNClassifier(nn.Module):
         return x
 
 class DataParser:
-    def __init__(self, data_path, device='cpu'):
+    def __init__(self, data_path):
         """
         Initialize the DataParser instance.
 
@@ -76,7 +76,7 @@ class DataParser:
         - device (torch.device): The device to use for tensor operations.
         """
         self.data_path = data_path
-        self.device = device
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     def parse_data(self, folder_name):
         """
@@ -189,7 +189,7 @@ class ModelTrainer:
         self.model = model
         self.data_processor = data_processor
         self.config = config
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = self.data_processor.device
         self.model.to(self.device)
 
     def train(self):
@@ -198,13 +198,13 @@ class ModelTrainer:
         """
         train_loader, validation_loader = self._prepare_data_loaders()
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.config['lr'], weight_decay=0.15)
-        criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([3]))
+        criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([3])).to(self.device)
 
         for epoch in range(self.config['num_epochs']):
             self._train_one_epoch(train_loader, optimizer, criterion)
             self._validate(validation_loader)
 
-        self.save_model()
+        self._save_model()
 
     def _prepare_data_loaders(self):
         """
@@ -231,7 +231,7 @@ class ModelTrainer:
         :return: A list of sample weights corresponding to each item in the dataset.
         """
         class_weights = [1, 2]  # Adjust based on class distribution
-        sample_weights = [class_weights[int(label.numpy())] for _, label in dataset]
+        sample_weights = [class_weights[int(label.cpu().numpy())] for _, label in dataset]
         return sample_weights
 
     def _train_one_epoch(self, train_loader, optimizer, criterion):
@@ -242,7 +242,7 @@ class ModelTrainer:
         :param optimizer: The optimizer.
         :param criterion: The loss function.
         """
-        Performance = PerformanceMetrics()
+        Performance = PerformanceMetrics(self.device)
 
         for images, labels in train_loader:
             optimizer.zero_grad()
@@ -255,8 +255,6 @@ class ModelTrainer:
         Performance.calculate_accuracy()
         pass
 
-
-
     def _validate(self, validation_loader):
         """
         Validates the model on the validation dataset.
@@ -264,7 +262,7 @@ class ModelTrainer:
         :param validation_loader: DataLoader for the validation data.
         """
         self.model.eval()
-        performance = PerformanceMetrics()
+        performance = PerformanceMetrics(self.device)
 
         with torch.no_grad():
             for images, labels in validation_loader:
@@ -290,17 +288,19 @@ class PerformanceMetrics:
     A class for computing and storing performance metrics for binary classification problems.
     """
 
-    def __init__(self):
+    def __init__(self,device='cpu'):
         """
         Initializes the PerformanceMetrics class with placeholders for metrics.
         """
+        self.device  = device
         self.tp = 0  # True Positives
         self.tn = 0  # True Negatives
         self.fp = 0  # False Positives
         self.fn = 0  # False Negatives
 
-        self.ground_truth = torch.tensor([], dtype=torch.float32)  # Initialize empty tensor for ground truths
-        self.predictions = torch.tensor([], dtype=torch.float32)  # Initialize empty tensor for predictions
+
+        self.ground_truth = torch.tensor([], dtype=torch.float32).to(self.device)  # Initialize empty tensor for ground truths
+        self.predictions = torch.tensor([], dtype=torch.float32).to(self.device)  # Initialize empty tensor for predictions
 
     def update_metrics(self):
         """
@@ -415,7 +415,7 @@ class ModelTester:
         - test_save_path: Path where test results and images are saved.
         - model_paths: A tuple or list containing paths to the two models to be combined for testing.
         """
-
+        self.device = data_processor.device
         self.test_data_loader = DataLoader(data_processor.parse_data(TEST_NAME), batch_size=1, shuffle=True)
         self.test_save_path = os.path.join(data_processor.data_path,'res')
         os.makedirs(self.test_save_path, exist_ok=True)
@@ -445,16 +445,16 @@ class ModelTester:
         """
         if not os.path.exists(self.test_save_path):
             os.makedirs(self.test_save_path)
-        performance = PerformanceMetrics()
+        performance = PerformanceMetrics(self.device)
         # Directories for true and false predictions
-        true_path = os.path.join(self.test_save_path, "true")
-        false_path = os.path.join(self.test_save_path, "false")
+        true_path = os.path.join(self.test_save_path, TRUE_NAME)
+        false_path = os.path.join(self.test_save_path, FALSE_NAME)
         os.makedirs(true_path, exist_ok=True)
         os.makedirs(false_path, exist_ok=True)
 
 
         with torch.no_grad():
-            for images, labels in self.test_data_loader:
+            for i, (images, labels) in enumerate(self.test_data_loader):
                 outputs = self.models[0](images)
                 prediction = torch.sigmoid(outputs) >= 0.5
 
@@ -465,42 +465,44 @@ class ModelTester:
 
                 performance.push(labels, prediction)
 
-                self.save_output_images(images, prediction, true_path, false_path)
+                self.save_output_images(i,images,labels, prediction, true_path, false_path)
+            performance.calculate_scores()
 
 
-    def save_output_images(self, images, predictions, true_path, false_path):
+    def save_output_images(self,idx, images,label,predictions, true_path, false_path):
         """
         Saves output images in separate directories based on prediction results.
 
         Parameters:
         - images: Tensor of images from the DataLoader.
         - predictions: Tensor of model predictions.
-        - true_path: Path to save images for positive predictions.
-        - false_path: Path to save images for negative predictions.
+        - true_path: Path to save images for positive label.
+        - false_path: Path to save images for negative label.
         """
         for i, image in enumerate(images):
             prediction = predictions[i]
             img = F.to_pil_image(image)
-            if prediction:
-                img.save(os.path.join(true_path, f"{i}.png"))
+            if label:
+                img.save(os.path.join(true_path, f"{(i + 1) * (idx + 1)}_{prediction.cpu().numpy()}.png"))
             else:
-                img.save(os.path.join(false_path, f"{i}.png"))
+                img.save(os.path.join(false_path, f"{(i + 1) * (idx + 1)}_{prediction.cpu().numpy()}.png"))
 
 def main():
     """
     Main function to instantiate model, data processor, and trainer classes and start the training process.
     """
-    data_path = r'/Users/zvistein/Documents/CV/work chalanges/faces'
+    data_path = r'/path/to/data/'
 
     config = {
         'data_path': data_path,
         'batch_size': 10,
-        'num_epochs': 40,
+        'num_epochs': 1,
         'lr': 0.0001,
         'validation_split_factor': 7
     }
 
     data_processor = DataParser(data_path)
+
     model = CNNClassifier()
     trainer = ModelTrainer(model, data_processor, config)
     trainer.train()
