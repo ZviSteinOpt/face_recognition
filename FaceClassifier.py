@@ -9,6 +9,8 @@ from torchvision.transforms import functional as F
 from PIL import Image
 import torch.nn as nn
 from captum.attr import IntegratedGradients
+import argparse
+from tqdm import tqdm
 
 # Constants for data organization
 TRUE_NAME = 'face'
@@ -198,9 +200,13 @@ class ModelTrainer:
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.config['lr'], weight_decay=0.15)
         criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([3])).to(self.device)
 
-        for epoch in range(self.config['num_epochs']):
-            self._train_one_epoch(train_loader, optimizer, criterion)
-            self._validate(validation_loader)
+
+        for epoch in tqdm(range(self.config['num_epochs']), desc="Training Progress"):
+            train_accuracy = self._train_one_epoch(train_loader, optimizer, criterion)
+            validation_accuracy = self._validate(validation_loader)
+            tqdm.write(f"Epoch {epoch + 1}/{self.config['num_epochs']}: "
+                       f"Training Accuracy: {train_accuracy:.2f}, "
+                       f"Validation Accuracy: {validation_accuracy:.2f}")
 
         self._save_model()
 
@@ -250,8 +256,7 @@ class ModelTrainer:
             optimizer.step()
             prediction = torch.sigmoid(outputs) >= 0.5
             Performance.push(labels, prediction)
-        Performance.calculate_accuracy()
-        pass
+        return Performance.calculate_accuracy()
 
     def _validate(self, validation_loader):
         """
@@ -267,9 +272,8 @@ class ModelTrainer:
                 outputs = self.model(images)
                 prediction = torch.sigmoid(outputs) >= 0.5
                 performance.push(labels, prediction)
-            performance.calculate_scores()
+            return performance.calculate_accuracy()
 
-        pass
 
     def _save_model(self, save_path='model.pth'):
         """
@@ -387,7 +391,7 @@ class PerformanceMetrics:
         pos_score = self.tp / (self.fn + self.tp) if (self.fn + self.tp) > 0 else 0
         neg_score = self.tn / (self.fp + self.tn) if (self.fp + self.tn) > 0 else 0
         accuracy = 0.5*pos_score+0.5*neg_score
-        print(f"Accuracy: {100 * accuracy:.2f}%")
+        return accuracy
 
     def push(self, ground_truth, prediction):
         self.ground_truth = torch.cat((self.ground_truth, ground_truth.float()),
@@ -487,23 +491,43 @@ def main():
     """
     Main function to instantiate model, data processor, and trainer classes and start the training process.
     """
-    data_path = r'/path/to/data/'
+
+    parser = argparse.ArgumentParser(description="Face Recognition Model")
+    parser.add_argument('--mode', type=str, required=True, help='Mode: train or test')
+    parser.add_argument('--data_path', type=str, default='./data', help='Path to the data directory')
+    parser.add_argument('--model_path', type=str, nargs='+', default=[],
+                        help='Path to the saved model file(s) for testing')
+    parser.add_argument('--batch_size', type=int, default=10, help='Batch size for training/testing')
+    parser.add_argument('--num_epochs', type=int, default=10, help='Number of epochs for training')
+    parser.add_argument('--lr', type=float, default=0.0001, help='Learning rate for training')
+    parser.add_argument('--validation_split_factor', type=int, default=7,
+                        help='Validation split factor for training')
+
+    args = parser.parse_args()
 
     config = {
-        'data_path': data_path,
-        'batch_size': 10,
-        'num_epochs': 10,
-        'lr': 0.0001,
-        'validation_split_factor': 7
+        'data_path': args.data_path,
+        'batch_size': args.batch_size,
+        'num_epochs': args.num_epochs,
+        'lr': args.lr,
+        'validation_split_factor': args.validation_split_factor
     }
 
-    data_processor = DataParser(data_path)
+    data_processor = DataParser(args.data_path)
 
-    model = CNNClassifier()
-    trainer = ModelTrainer(model, data_processor, config)
-    trainer.train()
-    tester = ModelTester(data_processor, ['model_0.87_0.89.pth','model_0.72_0.94.pth'])
-    tester.test_models()
+    if args.mode == 'train':
+        model = CNNClassifier()
+        trainer = ModelTrainer(model, data_processor, config)
+        trainer.train()
+    elif args.mode == 'test':
+        if not args.model_path:
+            print("Error: Please provide at least one model path for testing.")
+            return
+        tester = ModelTester(data_processor, args.model_path)
+        tester.test_models()
+    else:
+        print("Error: Unsupported mode. Use 'train' or 'test'.")
+
 
 if __name__ == '__main__':
     main()
