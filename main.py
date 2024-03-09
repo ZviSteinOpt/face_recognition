@@ -492,7 +492,7 @@ def main():
     config = {
         'data_path': data_path,
         'batch_size': 10,
-        'num_epochs': 1,
+        'num_epochs': 10,
         'lr': 0.0001,
         'validation_split_factor': 7
     }
